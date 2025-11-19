@@ -240,7 +240,7 @@ class Network:
         }
         with open(f"{filename}.json", 'w') as f:
             json.dump(config, f)
-        print(f"Model saved to {filename}.json")
+        print(f"\nModel saved to {filename}.json")
 
     def load(self, filename):
         if not os.path.exists(f"{filename}.json"):
@@ -268,7 +268,7 @@ class Network:
 
             # Загрузка весов
             layer.load_weights(np.array(config['weights'][i], dtype=np.float32))
-        print(f"Weights loaded from {filename}.json")
+        print(f"\nWeights loaded from {filename}.json")
 
 
 class RLNetwork(Network):
@@ -394,7 +394,7 @@ class RLNetwork(Network):
             if episode % 100 == 0 and episode > 0:
                 self.save(f"rl_model_episode_{episode}")
 
-        self.save("final_rl_model")
+        self.save("trained_rl_model")
         print("Training completed!")
 
 
@@ -417,68 +417,79 @@ def main():
     net.load("rl_model")
 
     print("RL Neural Network initialized!")
-    print("1. Run single prediction")
-    print("2. Start training (requires environment)")
-    print("3. Exit")
 
-    choice = input("Select option (1-3): ")
+    while True:
+        print("\n1. Run single prediction")
+        print("2. Start training (requires environment)")
+        print("3. Load from rl_model")
+        print("4. Load from trained_rl_model")
+        print("5. Exit\n")
 
-    if choice == '1':
-        print("\nEnter 5 numbers separated by spaces for state:")
-        try:
-            user_input = list(map(float, input().split()))
-            if len(user_input) != 5:
-                print("Error: Exactly 5 numbers required.")
+        choice = int(input("Select option (1-5): "))
+
+        if choice == 1:
+            print("\nEnter 5 numbers separated by spaces for state:")
+            try:
+                user_input = list(map(float, input().split()))
+                if len(user_input) != 5:
+                    print("Error: Exactly 5 numbers required.")
+                    return
+            except ValueError:
+                print("Error: Invalid input. Please enter numbers only.")
                 return
-        except ValueError:
-            print("Error: Invalid input. Please enter numbers only.")
+
+            # Предсказание Q-значений
+            q_values = net.predict_q_values(user_input)
+            print("\nQ-values for each action:", q_values)
+            best_action = np.argmax(q_values)
+            print(f"Best action: {best_action} with Q-value: {q_values[best_action]:.4f}")
+
+            # Сохранение модели
+            net.save("rl_model")
+
+        elif choice == 2:
+            print("\nTraining mode selected. Note: This requires a compatible environment.")
+            print("For demonstration, we'll use a simple mock environment.")
+
+            class MockEnv:
+                """Простая mock-среда для демонстрации"""
+
+                def __init__(self):
+                    self.state = np.random.rand(5)
+                    self.steps = 0
+
+                def reset(self):
+                    self.state = np.random.rand(5)
+                    self.steps = 0
+                    return self.state
+
+                def step(self, action):
+                    self.steps += 1
+                    # Простая логика вознаграждения
+                    reward = float(np.sin(self.steps * 0.1) + 0.1 * action)
+                    self.state = np.random.rand(5)  # новое случайное состояние
+                    done = self.steps >= 50
+                    return self.state, reward, done, {}
+
+            env = MockEnv()
+            print("\nStarting training with mock environment...")
+            print("This is a demonstration. For real RL tasks, use proper environments like Gym.")
+
+            net.train(env, episodes=100, max_steps=50)
+
+        elif choice == 3:
+            # Загрузка весов если они существуют
+            net.load("rl_model")
+
+        elif choice == 4:
+            net.load("trained_rl_model")
+
+        elif choice == 5:
+            print("\nExiting...")
             return
 
-        # Предсказание Q-значений
-        q_values = net.predict_q_values(user_input)
-        print("\nQ-values for each action:", q_values)
-        best_action = np.argmax(q_values)
-        print(f"Best action: {best_action} with Q-value: {q_values[best_action]:.4f}")
-
-        # Сохранение модели
-        net.save("rl_model")
-
-    elif choice == '2':
-        print("\nTraining mode selected. Note: This requires a compatible environment.")
-        print("For demonstration, we'll use a simple mock environment.")
-
-        class MockEnv:
-            """Простая mock-среда для демонстрации"""
-
-            def __init__(self):
-                self.state = np.random.rand(5)
-                self.steps = 0
-
-            def reset(self):
-                self.state = np.random.rand(5)
-                self.steps = 0
-                return self.state
-
-            def step(self, action):
-                self.steps += 1
-                # Простая логика вознаграждения
-                reward = float(np.sin(self.steps * 0.1) + 0.1 * action)
-                self.state = np.random.rand(5)  # новое случайное состояние
-                done = self.steps >= 50
-                return self.state, reward, done, {}
-
-        env = MockEnv()
-        print("\nStarting training with mock environment...")
-        print("This is a demonstration. For real RL tasks, use proper environments like Gym.")
-
-        net.train(env, episodes=100, max_steps=50)
-
-    elif choice == '3':
-        print("Exiting...")
-        return
-
-    else:
-        print("Invalid choice!")
+        else:
+            print("Invalid choice!")
 
 
 if __name__ == '__main__':
