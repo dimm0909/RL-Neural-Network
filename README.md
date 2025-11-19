@@ -5,7 +5,7 @@
 ## About the project
 
 A small personal project to develop a simple Rl neural network.  
-From a global perspective, connect it to Unity and train it to mix the object.
+From a global perspective, connect it to Unity and train it to move the object.
 
 ---
 
