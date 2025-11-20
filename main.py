@@ -46,120 +46,102 @@ ACTIVATION_DERIVATIVES = {
 
 
 class Layer:
-    def __init__(self, items, item_size, extra_size, activation='relu'):
-        assert items > 0
-        assert item_size > 0
-        assert extra_size >= 0
-        self.items = items
-        self.item_size = item_size
-        self.extra_size = extra_size
+    def __init__(self, input_size, output_size, activation='relu'):
+        assert input_size > 0
+        assert output_size > 0
+        self.input_size = input_size
+        self.output_size = output_size
         self.activation_name = activation
         self.activation = ACTIVATION_FUNCTIONS[activation]
         self.activation_derivative = ACTIVATION_DERIVATIVES[activation]
         self.weights = None
-        self._expand_op = None
-        # Для backpropagation
+        self.bias = None
         self.last_input = None
-        self.last_masked = None
+        self.last_weighted_sum = None
         self.last_activated = None
         self.weights_grad = None
+        self.bias_grad = None
 
     def build(self):
-        # He initialization для ReLU, Xavier для других
-        if self.activation_name == 'relu':
-            std = np.sqrt(2 / self.items)
-        else:
-            std = np.sqrt(1 / self.items)
+        # Xavier/Glorot initialization
+        std = np.sqrt(2 / (self.input_size + self.output_size))
 
-        self.weights = np.random.randn(self.items) * std
+        # Веса: матрица [output_size, input_size]
+        self.weights = np.random.randn(self.output_size, self.input_size) * std
         self.weights = self.weights.astype(np.float32)
-        self.weights_grad = np.zeros_like(self.weights)
 
-        # Создание матрицы расширения
-        self._expand_op = np.zeros((self.items, self.items * self.item_size), dtype=np.float32)
-        for i in range(self.items):
-            start_idx = i * self.item_size
-            end_idx = (i + 1) * self.item_size
-            self._expand_op[i, start_idx:end_idx] = 1.0
+        # Смещения
+        self.bias = np.zeros(self.output_size, dtype=np.float32)
+
+        # Градиенты
+        self.weights_grad = np.zeros_like(self.weights)
+        self.bias_grad = np.zeros_like(self.bias)
 
     def call(self, inputs):
-        self.last_input = np.array(inputs, dtype=np.float32)
+        self.last_input = np.array(inputs, dtype=np.float32).reshape(-1)
 
-        op_mask_part = self.last_input[:self.items * self.item_size]
-        self.ext_part = self.last_input[self.items * self.item_size:] if self.extra_size > 0 else None
+        # Проверка размера входа
+        if len(self.last_input) != self.input_size:
+            raise ValueError(f"Expected input size {self.input_size}, got {len(self.last_input)}")
 
-        # Применение весов и расширение
-        extended_weights = np.matmul(self.weights, self._expand_op)
-
-        # Сохраняем для backpropagation
-        self.extended_weights = extended_weights
-
-        # Элементное умножение
-        self.last_masked = op_mask_part * extended_weights
+        # Линейное преобразование: output = weights @ input + bias
+        self.last_weighted_sum = np.dot(self.weights, self.last_input) + self.bias
 
         # Применение активации
-        self.last_activated = self.activation(self.last_masked)
+        self.last_activated = self.activation(self.last_weighted_sum)
 
-        if self.extra_size > 0:
-            return np.concatenate((self.last_activated, self.ext_part))
-        else:
-            return self.last_activated
+        return self.last_activated.copy()
 
     def backward(self, output_grad):
         """Обратное распространение для этого слоя"""
-        if self.extra_size > 0:
-            # Разделяем градиент для основной части и дополнительной
-            grad_main = output_grad[:self.items * self.item_size]
-            grad_ext = output_grad[self.items * self.item_size:]
-        else:
-            grad_main = output_grad
-            grad_ext = None
+        # Убедимся, что градиент имеет правильную размерность
+        if output_grad.ndim == 1 and output_grad.shape[0] != self.output_size:
+            # Если градиент не соответствует размеру выхода, преобразуем его
+            output_grad = output_grad.reshape(-1)
+            if output_grad.shape[0] != self.output_size:
+                raise ValueError(f"Gradient size mismatch: expected {self.output_size}, got {output_grad.shape[0]}")
 
         # Градиент через активацию
-        grad_through_activation = grad_main * self.activation_derivative(self.last_masked)
+        grad_through_activation = output_grad * self.activation_derivative(self.last_weighted_sum)
 
-        # Градиент по расширенным весам (для каждого элемента)
-        grad_wrt_extended_weights = grad_through_activation * self.last_input[:self.items * self.item_size]
+        # Градиент по весам
+        self.weights_grad = np.outer(grad_through_activation, self.last_input)
 
-        # Градиент по весам (агрегация по соответствующим позициям)
-        grad_wrt_weights = np.zeros(self.items, dtype=np.float32)
-        for i in range(self.items):
-            start_idx = i * self.item_size
-            end_idx = (i + 1) * self.item_size
-            grad_wrt_weights[i] = np.sum(grad_wrt_extended_weights[start_idx:end_idx])
-
-        self.weights_grad = grad_wrt_weights
+        # Градиент по смещениям
+        self.bias_grad = grad_through_activation.copy()
 
         # Градиент по входу
-        input_grad = np.zeros_like(self.last_input)
-        input_grad_main = grad_through_activation * self.extended_weights
-
-        input_grad[:self.items * self.item_size] = input_grad_main
-        if self.extra_size > 0 and grad_ext is not None:
-            input_grad[self.items * self.item_size:] = grad_ext
+        input_grad = np.dot(self.weights.T, grad_through_activation)
 
         return input_grad
 
-    def apply_gradients(self, learning_rate, optimizer_state=None):
-        """Применение градиентов к весам"""
-        self.weights -= learning_rate * self.weights_grad
+    def apply_gradients(self, optimizer, layer_id):
+        """Применение градиентов к весам и смещениям"""
+        # Обновление весов
+        self.weights = optimizer.update(f"{layer_id}_weights", self.weights, self.weights_grad)
+        # Обновление смещений
+        self.bias = optimizer.update(f"{layer_id}_bias", self.bias, self.bias_grad)
+
         # Сброс градиентов
         self.weights_grad = np.zeros_like(self.weights_grad)
+        self.bias_grad = np.zeros_like(self.bias_grad)
 
     def get_config(self):
         return {
-            'items': self.items,
-            'item_size': self.item_size,
-            'extra_size': self.extra_size,
+            'input_size': self.input_size,
+            'output_size': self.output_size,
             'activation': self.activation_name
         }
 
     def save_weights(self):
-        return self.weights.copy()
+        return {
+            'weights': self.weights.copy(),
+            'bias': self.bias.copy()
+        }
 
-    def load_weights(self, weights):
-        self.weights = weights.astype(np.float32)
-
+    def load_weights(self, weights_data):
+        self.weights = weights_data['weights'].astype(np.float32)
+        self.bias = weights_data['bias'].astype(np.float32)
 
 class Optimizer:
     """Базовый класс оптимизатора"""
@@ -236,8 +218,17 @@ class Network:
     def save(self, filename):
         config = {
             'layers': [layer.get_config() for layer in self.layers],
-            'weights': [layer.save_weights().tolist() for layer in self.layers]
+            'weights': []
         }
+
+        # Сохраняем веса в формате, совместимом с JSON
+        for layer in self.layers:
+            weights_data = layer.save_weights()
+            config['weights'].append({
+                'weights': weights_data['weights'].tolist(),
+                'bias': weights_data['bias'].tolist()
+            })
+
         with open(f"{filename}.json", 'w') as f:
             json.dump(config, f)
         print(f"\nModel saved to {filename}.json")
@@ -260,26 +251,28 @@ class Network:
             current_config = layer.get_config()
 
             # Проверка совместимости параметров слоя
-            if (saved_config['items'] != current_config['items'] or
-                    saved_config['item_size'] != current_config['item_size'] or
-                    saved_config['extra_size'] != current_config['extra_size']):
+            if (saved_config['input_size'] != current_config['input_size'] or
+                    saved_config['output_size'] != current_config['output_size']):
                 print(f"Error: Layer {i} configuration mismatch. Cannot load weights.")
                 return
 
             # Загрузка весов
-            layer.load_weights(np.array(config['weights'][i], dtype=np.float32))
+            weights_data = {
+                'weights': np.array(config['weights'][i]['weights'], dtype=np.float32),
+                'bias': np.array(config['weights'][i]['bias'], dtype=np.float32)
+            }
+            layer.load_weights(weights_data)
         print(f"\nWeights loaded from {filename}.json")
 
 
 class RLNetwork(Network):
     """RL-специализированная нейросеть"""
-
-    def __init__(self, layers, action_size=5):
+    def __init__(self, layers, action_size):
         super().__init__(layers)
         self.action_size = action_size
         self.optimizer = AdamOptimizer(learning_rate=0.001)
         self.replay_buffer = ReplayBuffer(max_size=10000)
-        self.gamma = 0.99  # discount factor
+        self.gamma = 0.99
         self.batch_size = 32
 
     def predict_q_values(self, state):
@@ -315,14 +308,20 @@ class RLNetwork(Network):
 
             # Вычисление целевых Q-значений
             next_q = self.predict_q_values(next_states[i])
-            target_value = rewards[i]
-            if not dones[i]:
-                target_value += self.gamma * np.max(next_q)
+            for action in range(self.action_size):
+                target_value = rewards[i]
+                if not dones[i]:
+                    # Используем Double DQN подход для стабильности
+                    best_next_action = np.argmax(next_q)
+                    target_value += self.gamma * next_q[best_next_action]
+                target_q[i][action] = target_value
 
+            # Обновляем только Q-значение для выбранного действия
             target_q[i][actions[i]] = target_value
 
         # Обратное распространение для каждого примера в батче
-        total_grad = [np.zeros_like(layer.weights) for layer in self.layers]
+        total_weights_grad = [np.zeros_like(layer.weights) for layer in self.layers]
+        total_bias_grad = [np.zeros_like(layer.bias) for layer in self.layers]
 
         for i in range(batch_size):
             # Forward pass для сохранения промежуточных значений
@@ -332,20 +331,21 @@ class RLNetwork(Network):
             output_grad = 2 * (current_q[i] - target_q[i]) / batch_size
 
             # Backward pass
-            grad = output_grad
+            grad = output_grad.copy()  # Создаем копию для безопасности
             for layer in reversed(self.layers):
                 grad = layer.backward(grad)
 
             # Накопление градиентов
             for j, layer in enumerate(self.layers):
-                total_grad[j] += layer.weights_grad
+                total_weights_grad[j] += layer.weights_grad
+                total_bias_grad[j] += layer.bias_grad
 
-        # Применение градиентов с Adam оптимизацией
+        # Применение градиентов
         for i, layer in enumerate(self.layers):
             layer_id = f"layer_{i}"
-            layer.weights = self.optimizer.update(layer_id, layer.weights, total_grad[i])
+            layer.weights = self.optimizer.update(f"{layer_id}_weights", layer.weights, total_weights_grad[i])
+            layer.bias = self.optimizer.update(f"{layer_id}_bias", layer.bias, total_bias_grad[i])
 
-        # Вычисление потерь для отладки
         loss = self.compute_loss(current_q, target_q)
         return loss
 
@@ -361,10 +361,15 @@ class RLNetwork(Network):
         return loss
 
     def train(self, env, episodes=1000, max_steps=200):
-        """Основной цикл обучения RL-агента"""
-        epsilon = 1.0  # начальное значение epsilon
+        """Основной цикл обучения RL-агента с целевой сетью"""
+        # Создание целевой сети
+        self.update_target_network()
+        target_update_freq = 100  # Частота обновления целевой сети
+
+        epsilon = 1.0
         epsilon_min = 0.01
         epsilon_decay = 0.995
+        total_steps = 0
 
         for episode in range(episodes):
             state = env.reset()
@@ -377,18 +382,26 @@ class RLNetwork(Network):
 
                 state = next_state
                 total_reward += reward
+                total_steps += 1
+
+                # Обучение на каждом шаге, если в буфере достаточно данных
+                if len(self.replay_buffer) > self.batch_size:
+                    self.replay()
 
                 if done:
                     break
-
-            loss = self.replay()
 
             # Уменьшение epsilon
             if epsilon > epsilon_min:
                 epsilon *= epsilon_decay
 
+            # Обновление целевой сети
+            if total_steps % target_update_freq == 0:
+                self.update_target_network()
+                print(f"Updated target network at step {total_steps}")
+
             if episode % 10 == 0:
-                print(f"Episode: {episode}, Total Reward: {total_reward:.2f}, Loss: {loss:.4f}, Epsilon: {epsilon:.4f}")
+                print(f"Episode: {episode}, Total Reward: {total_reward:.2f}, Epsilon: {epsilon:.4f}")
 
             # Сохранение модели каждые 100 эпизодов
             if episode % 100 == 0 and episode > 0:
@@ -397,15 +410,45 @@ class RLNetwork(Network):
         self.save("trained_rl_model")
         print("Training completed!")
 
+    def update_target_network(self):
+        """Создание и обновление целевой сети для стабильного обучения"""
+        target_layers = []
+        for layer in self.layers:
+            target_layer = Layer(layer.input_size, layer.output_size, layer.activation_name)
+            target_layer.build()
+            target_layer.weights = layer.weights.copy()
+            target_layer.bias = layer.bias.copy()
+            target_layers.append(target_layer)
+
+        self.target_network = Network(target_layers)
+        return self.target_network
+
+    def compute_target_q(self, next_states, rewards, dones):
+        """Вычисление целевых Q-значений с использованием целевой сети"""
+        batch_size = len(next_states)
+        target_q = np.zeros((batch_size, self.action_size))
+
+        for i in range(batch_size):
+            next_q = self.target_network.call(next_states[i])
+            best_next_action = np.argmax(next_q)
+
+            for action in range(self.action_size):
+                target_value = rewards[i]
+                if not dones[i]:
+                    target_value += self.gamma * next_q[best_next_action]
+                target_q[i][action] = target_value
+
+        return target_q
+
 
 def create_rl_network():
-    """Создает RL-нейросеть"""
+    """Создает RL-нейросеть с гибкой архитектурой"""
     layers = [
-        Layer(items=5, item_size=1, extra_size=0, activation='sigmoid'),
-        Layer(items=5, item_size=1, extra_size=0, activation='sigmoid'),
-        Layer(items=5, item_size=1, extra_size=0, activation='sigmoid')  # линейный выход для Q-значений
+        Layer(input_size=5, output_size=16, activation='relu'),
+        Layer(input_size=16, output_size=8, activation='relu'),
+        Layer(input_size=8, output_size=1, activation='none')
     ]
-    return RLNetwork(layers, action_size=5)
+    return RLNetwork(layers, action_size=1)
 
 
 def main():
